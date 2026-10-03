@@ -11,12 +11,15 @@ class PinScreen extends StatefulWidget {
 }
 
 class _PinScreenState extends State<PinScreen> {
+  static const int _minPinLength = 6;
+  static const int _maxPinLength = 8;
+
   String _pin = '';
   bool _isLoading = false;
   String? _errorMessage;
 
   void _onDigit(String d) {
-    if (_isLoading || _pin.length >= 8) return;
+    if (_isLoading || _pin.length >= _maxPinLength) return;
     setState(() {
       _pin += d;
       _errorMessage = null;
@@ -31,7 +34,7 @@ class _PinScreenState extends State<PinScreen> {
   }
 
   Future<void> _submit() async {
-    if (_isLoading || _pin.isEmpty) return;
+    if (_isLoading || _pin.length < _minPinLength) return;
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -100,23 +103,33 @@ class _PinScreenState extends State<PinScreen> {
 
               const SizedBox(height: 20),
 
-              // PIN Indicator dots
+              // PIN Indicator dots - a 6-8 digit PIN, so this must track the actual length, not a fixed 4.
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(4, (index) {
+                children: List.generate(_maxPinLength, (index) {
                   final filled = index < _pin.length;
+                  final required = index < _minPinLength;
                   return Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 8),
-                    width: 14,
-                    height: 14,
+                    margin: const EdgeInsets.symmetric(horizontal: 6),
+                    width: 12,
+                    height: 12,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: filled
                           ? const Color(0xFF10B981)
-                          : Colors.grey.shade800,
+                          : (required
+                              ? Colors.grey.shade600
+                              : Colors.grey.shade800),
                     ),
                   );
                 }),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _pin.length < _minPinLength
+                    ? '$_minPinLength-$_maxPinLength digits ($_minPinLength minimum)'
+                    : '${_pin.length}/$_maxPinLength digits',
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
               ),
 
               const SizedBox(height: 16),
@@ -175,8 +188,10 @@ class _PinScreenState extends State<PinScreen> {
             _key('0'),
             _actionKey(
               icon: Icons.check,
-              color: const Color(0xFF10B981),
-              onTap: _submit,
+              color: _pin.length >= _minPinLength
+                  ? const Color(0xFF10B981)
+                  : Colors.grey.shade800,
+              onTap: _pin.length >= _minPinLength ? _submit : null,
             ),
           ],
         ),
@@ -213,7 +228,7 @@ class _PinScreenState extends State<PinScreen> {
   }
 
   Widget _actionKey(
-      {required IconData icon, required VoidCallback onTap, Color? color}) {
+      {required IconData icon, VoidCallback? onTap, Color? color}) {
     return Expanded(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 6),

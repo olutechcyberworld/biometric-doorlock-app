@@ -1,20 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Scopes cleartext (plain HTTP/WS) traffic to only the door lock's local
-  network, instead of allowing it app-wide.
-
-  Covers the mDNS hostname (doorlock.local, and any other *.local host)
-  used by DeviceClient by default. If you ever connect by raw IP address
-  instead (e.g. mDNS resolution fails on your router), add a second
-  <domain> entry below with that literal IP - domain-config in Android's
-  Network Security Config does not support IP ranges/CIDR, only exact
-  hostnames or exact IP literals.
+  Local-network-only prototype (Rev 2 doc Section 2.6: TLS on the app<->lock link is explicitly out of scope).
+  The Device Address screen lets the owner enter either the mDNS hostname (doorlock.local) or a raw local IP
+  they typed themselves - Android's Network Security Config only matches an exact hostname or an exact IP
+  literal per <domain> entry (no CIDR/wildcard IP ranges), so a per-IP domain-config can't cover "whatever IP
+  the owner's router happens to hand out". Scoping by hostname only would silently block the raw-IP path the
+  Home screen itself invites, so cleartext is permitted for the whole app instead. This app has no other
+  network traffic (see docs/APP_PROTOCOL.md) - the base-config below matches what it actually does today; when
+  that changes (e.g. an HTTPS-hosted asset is added later), tighten this back to a scoped <domain-config>.
 -->
 <network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">local</domain>
-        <!-- Example fallback if you connect by IP instead of doorlock.local:
-        <domain includeSubdomains="false">192.168.1.50</domain>
-        -->
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

@@ -36,6 +36,10 @@ class _EnrollScreenState extends State<EnrollScreen> {
   Uint8List? _latestJpegBytes;
   bool _faceFound = false;
   BoundingBox? _bbox;
+  // Set from each detection message (docs/APP_PROTOCOL.md): the device's actual detector frame is 240x240,
+  // but this is read from the message, not assumed, so it can never silently drift out of sync again.
+  double _frameW = 240;
+  double _frameH = 240;
 
   int _frameIndex = 0;
   int _framesNeeded = 5;
@@ -123,6 +127,8 @@ class _EnrollScreenState extends State<EnrollScreen> {
         final found = msg['face_found'] as bool? ?? false;
         setState(() {
           _faceFound = found;
+          _frameW = (msg['frame_w'] as num?)?.toDouble() ?? _frameW;
+          _frameH = (msg['frame_h'] as num?)?.toDouble() ?? _frameH;
           if (found && msg['bbox'] != null) {
             final b = msg['bbox'] as Map<String, dynamic>;
             _bbox = BoundingBox(
@@ -281,9 +287,9 @@ class _EnrollScreenState extends State<EnrollScreen> {
                       if (_faceFound && _bbox != null)
                         LayoutBuilder(
                           builder: (context, constraints) {
-                            // Scale from 96x96 to displayed view
-                            final scaleX = constraints.maxWidth / 96.0;
-                            final scaleY = constraints.maxHeight / 96.0;
+                            // Scale from the device's reported detector frame size to the displayed view.
+                            final scaleX = constraints.maxWidth / _frameW;
+                            final scaleY = constraints.maxHeight / _frameH;
 
                             return Positioned(
                               left: _bbox!.x * scaleX,

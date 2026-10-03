@@ -180,7 +180,7 @@ class _OverrideScreenState extends State<OverrideScreen> {
         ),
         const SizedBox(height: 8),
         const Text(
-          'You have 90 seconds. The door lock mechanism will unlatch once your fingerprint is touched.',
+          'You have 90 seconds. The door lock mechanism will unlatch once your fingerprint matches.',
           textAlign: TextAlign.center,
           style: TextStyle(color: Colors.grey, fontSize: 13),
         ),
