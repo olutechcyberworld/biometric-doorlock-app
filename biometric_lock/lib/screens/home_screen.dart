@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/device_client.dart';
 import '../widgets/olutech_logo.dart';
 import 'pin_screen.dart';
+import 'pin_setup_screen.dart';
 import 'override_screen.dart';
 import 'enroll_screen.dart';
 import 'manage_users_screen.dart';
@@ -15,6 +16,48 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final DeviceClient _client = DeviceClient.instance;
+  bool? _pinSet; // null = unknown (lock not reachable yet)
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshPinStatus();
+  }
+
+  Future<void> _refreshPinStatus() async {
+    final s = await _client.getPinStatus();
+    if (!mounted) return;
+    setState(() => _pinSet = s?.pinSet);
+  }
+
+  /// No PIN on the lock -> first-time setup. PIN exists -> prove the old one, then choose a new one.
+  /// Both end with a fingerprint at the door (the lock enforces that, not the app).
+  Future<void> _pinFlow() async {
+    if (_pinSet == null) await _refreshPinStatus();
+    if (!mounted) return;
+    final set = _pinSet;
+    if (set == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Cannot reach the lock. Use the settings icon to scan for it.')));
+      return;
+    }
+    if (!set) {
+      await Navigator.push(context,
+          MaterialPageRoute(builder: (_) => const PinSetupScreen()));
+    } else {
+      final token = await Navigator.push<String>(
+        context,
+        MaterialPageRoute(builder: (_) => PinScreen(flowName: 'PIN change')),
+      );
+      if (token == null || !mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => PinSetupScreen(sessionToken: token)),
+      );
+    }
+    await _refreshPinStatus();
+  }
 
   void _showDeviceAddressDialog() {
     final controller = TextEditingController(text: _client.host);
@@ -42,6 +85,24 @@ class _HomeScreenState extends State<HomeScreen> {
                 border: OutlineInputBorder(),
                 isDense: true,
               ),
+            ),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              icon: const Icon(Icons.wifi_find, size: 18),
+              label: const Text('Scan for lock'),
+              onPressed: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                messenger.showSnackBar(
+                    const SnackBar(content: Text('Scanning the network...')));
+                final ok = await _client.ensureReachable(force: true);
+                if (!mounted) return;
+                controller.text = _client.host;
+                messenger.showSnackBar(SnackBar(
+                    content: Text(ok
+                        ? 'Found door lock at ${_client.host}'
+                        : 'No door lock found. Check it is powered and on this Wi-Fi.')));
+                setState(() {});
+              },
             ),
           ],
         ),
@@ -222,6 +283,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 icon: Icons.people_outline,
                 color: Colors.cyan.shade600,
                 onTap: () => _startFlow('manage', 'User Management'),
+              ),
+              const SizedBox(height: 14),
+
+              _ActionButton(
+                title: _pinSet == false ? 'Set PIN' : 'Change PIN',
+                badge: 'FINGERPRINT',
+                subtitle: _pinSet == false
+                    ? 'No PIN on the lock yet - create your owner PIN'
+                    : 'Replace the owner PIN (needs your fingerprint)',
+                icon: Icons.password_outlined,
+                color: Colors.purple.shade300,
+                onTap: _pinFlow,
               ),
 
               const Spacer(),

@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'crypto_service.dart';
+import 'discovery_service.dart';
 
 class AuthResult {
   final String sessionToken;
@@ -17,6 +18,13 @@ class OverrideResult {
   final int timeoutMs;
 
   OverrideResult({required this.status, required this.timeoutMs});
+}
+
+class PinStatus {
+  final bool pinSet;
+  final int lockedMs;
+
+  PinStatus({required this.pinSet, required this.lockedMs});
 }
 
 class DeviceException implements Exception {
@@ -63,8 +71,33 @@ class DeviceClient {
     await prefs.setString(_prefKeyHost, _host);
   }
 
+  Future<bool> _answersWhoami(String host) async {
+    try {
+      final res = await http
+          .get(Uri.parse('http://$host/whoami'))
+          .timeout(const Duration(milliseconds: 1500));
+      if (res.statusCode == 200) {
+        final m = jsonDecode(res.body) as Map<String, dynamic>;
+        return m['device'] == 'doorlock';
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /// Makes sure [host] actually reaches the lock. The lock's IP depends on the network it joined and can change,
+  /// so when the saved address does not answer, scan the local network and save whatever address the lock has now.
+  Future<bool> ensureReachable({bool force = false}) async {
+    if (!force && await _answersWhoami(_host)) return true;
+    final d = await DiscoveryService.discover();
+    if (d == null) return false;
+    await setHost(d.port == 80 ? d.ip : '${d.ip}:${d.port}');
+    return true;
+  }
+
   /// Section 4: PIN Challenge-Response
   Future<String> authenticateWithPin(String pin) async {
+    await ensureReachable();
+
     // 1. GET /challenge
     final nonce = await _getChallenge();
 
@@ -87,6 +120,10 @@ class DeviceClient {
           return nonce;
         }
       }
+      if (res.statusCode == 409) {
+        throw DeviceException(
+            'No PIN is set on the lock yet. Use "Set PIN" on the home screen first.');
+      }
       throw DeviceException('Invalid response from doorlock device.');
     } on TimeoutException {
       throw DeviceException(
@@ -94,7 +131,7 @@ class DeviceClient {
     } catch (e) {
       if (e is DeviceException) rethrow;
       throw DeviceException(
-          'Could not find door lock at "$_host". Ensure both phone and lock are on the same Wi-Fi.');
+          'Could not find the door lock. Make sure it is powered and joined to the same Wi-Fi as this phone.');
     }
   }
 
@@ -121,8 +158,11 @@ class DeviceClient {
         final remaining = (data['attempts_remaining'] as num?)?.toInt();
 
         if (error == 'locked_out' || remaining == 0) {
+          final retryMs = (data['retry_after_ms'] as num?)?.toInt();
           throw DeviceException(
-            'Too many incorrect attempts. Try again in a few minutes.',
+            retryMs != null && retryMs > 0
+                ? 'Too many incorrect attempts. Try again in ${(retryMs / 1000).ceil()} s.'
+                : 'Too many incorrect attempts. Try again in a few minutes.',
             isLockout: true,
             attemptsRemaining: 0,
           );
@@ -134,6 +174,12 @@ class DeviceClient {
               : 'Incorrect PIN. Please try again.',
           attemptsRemaining: remaining,
         );
+      } else if (res.statusCode == 409) {
+        throw DeviceException(
+            'No PIN is set on the lock yet. Use "Set PIN" on the home screen first.');
+      } else if (res.statusCode == 400) {
+        throw DeviceException(
+            'The lock rejected the request (expired challenge). Please try again.');
       } else {
         throw DeviceException(
             'Authentication failed with HTTP ${res.statusCode}');
@@ -144,6 +190,89 @@ class DeviceClient {
       if (e is DeviceException) rethrow;
       throw DeviceException(
           'Could not reach door lock. Check local Wi-Fi network.');
+    }
+  }
+
+  /// GET /pin/status - whether the lock has a PIN yet (null = lock not reachable).
+  Future<PinStatus?> getPinStatus() async {
+    await ensureReachable();
+    try {
+      final res = await http
+          .get(Uri.parse('http://$_host/pin/status'))
+          .timeout(const Duration(seconds: 4));
+      if (res.statusCode != 200) return null;
+      final m = jsonDecode(res.body) as Map<String, dynamic>;
+      return PinStatus(
+        pinSet: m['pin_set'] == true,
+        lockedMs: (m['locked_ms'] as num?)?.toInt() ?? 0,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// First-time PIN. The lock then waits (up to ~20 s) for an enrolled finger on its sensor before it accepts it.
+  Future<void> setupPin(String pin) async {
+    await ensureReachable();
+    await _pinRequest(
+      Uri.parse('http://$_host/pin/setup'),
+      {'pin_hash': CryptoService.pinVerifierHex(pin)},
+    );
+  }
+
+  /// Change PIN: needs the session token from logging in with the OLD PIN, plus an enrolled finger at the lock.
+  Future<void> changePin(String sessionToken, String newPin) async {
+    await _pinRequest(
+      Uri.parse(
+          'http://$_host/pin/change?token=${Uri.encodeComponent(sessionToken)}'),
+      {'new_pin_hash': CryptoService.pinVerifierHex(newPin)},
+    );
+  }
+
+  Future<void> _pinRequest(Uri url, Map<String, String> body) async {
+    try {
+      final res = await http
+          .post(url,
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(body))
+          .timeout(const Duration(seconds: 30)); // the lock waits for the finger before it answers
+      if (res.statusCode == 200) return;
+      String error = '';
+      try {
+        error = (jsonDecode(res.body) as Map<String, dynamic>)['error']
+                as String? ??
+            '';
+      } catch (_) {}
+      switch (error) {
+        case 'no_finger':
+          throw DeviceException(
+              'No finger was read. Try again and touch the lock\'s fingerprint sensor right after pressing Save.');
+        case 'fingerprint_mismatch':
+          throw DeviceException(
+              'That fingerprint is not enrolled on the lock. If none is enrolled yet, enroll one first.');
+        case 'sensor_busy':
+          throw DeviceException(
+              'The lock is busy. Wait a few seconds and try again.');
+        case 'sensor_error':
+          throw DeviceException(
+              'The lock\'s fingerprint sensor reported an error.');
+        case 'pin_already_set':
+          throw DeviceException('A PIN is already set. Use "Change PIN".');
+        case 'too_soon':
+          throw DeviceException('Please wait 10 seconds and try again.');
+        case 'session_expired':
+          throw DeviceException(
+              'Session expired. Go back and enter your current PIN again.',
+              isSessionExpired: true);
+        default:
+          throw DeviceException('PIN request failed (HTTP ${res.statusCode}).');
+      }
+    } on TimeoutException {
+      throw DeviceException(
+          'The lock did not answer in time. Check the connection and try again.');
+    } catch (e) {
+      if (e is DeviceException) rethrow;
+      throw DeviceException('Could not reach the lock at $_host.');
     }
   }
 
@@ -163,6 +292,11 @@ class DeviceClient {
       } else if (res.statusCode == 401) {
         throw DeviceException('Session expired. Please re-enter your PIN.',
             isSessionExpired: true);
+      } else if (res.statusCode == 409) {
+        final err = data['error'] as String? ?? '';
+        throw DeviceException(err == 'override_active'
+            ? 'An override window is already open. Touch the lock\'s fingerprint sensor.'
+            : 'The lock is busy right now. Wait a few seconds and try again.');
       } else {
         throw DeviceException('Override request failed: ${res.statusCode}');
       }

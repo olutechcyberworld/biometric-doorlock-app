@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -26,6 +27,8 @@ class _ManageUsersScreenState extends State<ManageUsersScreen> {
   WebSocketChannel? _channel;
   List<EnrolledUser> _users = [];
   String? _errorMessage;
+  Timer? _watchdog;
+  bool _heardFromLock = false;
 
   @override
   void initState() {
@@ -36,21 +39,39 @@ class _ManageUsersScreenState extends State<ManageUsersScreen> {
   void _connect() {
     _channel = DeviceClient.instance.openSessionWebSocket(widget.sessionToken);
 
+    // The lock answers a new session immediately ("awaiting_fingerprint"). Silence means the socket never opened,
+    // so say so instead of leaving the user at "place your finger" forever.
+    _watchdog = Timer(const Duration(seconds: 8), () {
+      if (!_heardFromLock && mounted && _step == _ManageStep.awaitingFingerprint) {
+        setState(() {
+          _step = _ManageStep.error;
+          _errorMessage =
+              'The lock did not answer the live session. Check that the lock firmware is up to date and on the same Wi-Fi.';
+        });
+      }
+    });
+
     _channel!.stream.listen(
       (data) {
+        _heardFromLock = true;
+        _watchdog?.cancel();
         if (data is String) {
           _handleMessage(data);
         }
       },
       onError: (err) {
+        if (!mounted) return;
         setState(() {
           _step = _ManageStep.error;
-          _errorMessage = 'Connection failure.';
+          _errorMessage = 'Could not open the live session with the lock.';
         });
       },
       onDone: () {
-        if (_step != _ManageStep.error && mounted) {
-          // Closed
+        if (mounted && _step == _ManageStep.awaitingFingerprint) {
+          setState(() {
+            _step = _ManageStep.error;
+            _errorMessage = 'The lock closed the session. Go back and enter your PIN again.';
+          });
         }
       },
     );
@@ -70,6 +91,13 @@ class _ManageUsersScreenState extends State<ManageUsersScreen> {
           // Section 5.3 Step 5: Send select_mode manage
           _channel?.sink
               .add(jsonEncode({'type': 'select_mode', 'mode': 'manage'}));
+        } else if (state == 'unauthorized' || state == 'busy') {
+          setState(() {
+            _step = _ManageStep.error;
+            _errorMessage = state == 'busy'
+                ? 'The lock is already in an owner session. Try again in a moment.'
+                : 'The lock rejected the session. Go back and enter your PIN again.';
+          });
         } else if (state == 'fingerprint_failed' || state == 'timeout') {
           setState(() {
             _step = _ManageStep.error;
@@ -134,6 +162,7 @@ class _ManageUsersScreenState extends State<ManageUsersScreen> {
 
   @override
   void dispose() {
+    _watchdog?.cancel();
     _channel?.sink.add(jsonEncode({'type': 'done'}));
     _channel?.sink.close();
     super.dispose();

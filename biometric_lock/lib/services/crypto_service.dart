@@ -22,4 +22,8 @@ class CryptoService {
     // 4. Return lowercase hex representation
     return responseDigest.toString();
   }
+
+  /// What the lock stores for a PIN: lowercase hex of SHA-256(PIN as UTF-8 bytes). It is the HMAC key above, so it is
+  /// sent only when setting or changing the PIN, never when logging in.
+  static String pinVerifierHex(String pin) => sha256.convert(utf8.encode(pin)).toString();
 }

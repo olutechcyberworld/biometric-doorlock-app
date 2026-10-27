@@ -24,7 +24,7 @@ class EnrollScreen extends StatefulWidget {
   State<EnrollScreen> createState() => _EnrollScreenState();
 }
 
-enum _EnrollStep { nameInput, awaitingFingerprint, streaming, success, error }
+enum _EnrollStep { nameInput, awaitingFingerprint, streaming, newFingerprint, success, error }
 
 class _EnrollScreenState extends State<EnrollScreen> {
   _EnrollStep _step = _EnrollStep.nameInput;
@@ -41,6 +41,12 @@ class _EnrollScreenState extends State<EnrollScreen> {
   double _frameW = 240;
   double _frameH = 240;
 
+  Timer? _watchdog;
+  bool _heardFromLock = false;
+
+  // New person's fingerprint (after the 5 face captures): the lock asks for the same finger twice.
+  String _fpStep = 'place1';
+
   int _frameIndex = 0;
   int _framesNeeded = 5;
   String _hintText = 'Center your face in the frame.';
@@ -49,6 +55,7 @@ class _EnrollScreenState extends State<EnrollScreen> {
   @override
   void dispose() {
     _channel?.sink.close();
+    _watchdog?.cancel();
     _subscription?.cancel();
     _nameController.dispose();
     super.dispose();
@@ -64,9 +71,24 @@ class _EnrollScreenState extends State<EnrollScreen> {
     });
 
     _channel = DeviceClient.instance.openSessionWebSocket(widget.sessionToken);
+    _heardFromLock = false;
+
+    // The lock answers a new session immediately ("awaiting_fingerprint"). Silence means the socket never opened.
+    _watchdog?.cancel();
+    _watchdog = Timer(const Duration(seconds: 8), () {
+      if (!_heardFromLock && mounted && _step == _EnrollStep.awaitingFingerprint) {
+        setState(() {
+          _step = _EnrollStep.error;
+          _errorMessage =
+              'The lock did not answer the live session. Check that the lock firmware is up to date and on the same Wi-Fi.';
+        });
+      }
+    });
 
     _subscription = _channel!.stream.listen(
       (data) {
+        _heardFromLock = true;
+        _watchdog?.cancel();
         if (data is String) {
           _handleTextMessage(data);
         } else if (data is Uint8List) {
@@ -115,6 +137,18 @@ class _EnrollScreenState extends State<EnrollScreen> {
             'mode': 'enroll',
             'name': _nameController.text.trim(),
           }));
+        } else if (state == 'awaiting_new_fingerprint') {
+          setState(() {
+            _step = _EnrollStep.newFingerprint;
+            _fpStep = 'place1';
+          });
+        } else if (state == 'unauthorized' || state == 'busy') {
+          setState(() {
+            _step = _EnrollStep.error;
+            _errorMessage = state == 'busy'
+                ? 'The lock is already in an owner session. Try again in a moment.'
+                : 'The lock rejected the session. Go back and enter your PIN again.';
+          });
         } else if (state == 'fingerprint_failed' || state == 'timeout') {
           setState(() {
             _step = _EnrollStep.error;
@@ -158,6 +192,25 @@ class _EnrollScreenState extends State<EnrollScreen> {
                 : 'Capture failed. Try again.';
           });
         }
+      } else if (type == 'fingerprint_progress') {
+        setState(() => _fpStep = (msg['step'] as String?) ?? _fpStep);
+      } else if (type == 'enrollment_failed') {
+        final reason = msg['reason'] as String? ?? '';
+        setState(() {
+          _step = _EnrollStep.error;
+          _errorMessage = switch (reason) {
+            'fingerprint_timeout' =>
+              'No finger was read in time. Nothing was saved - start again.',
+            'fingerprint_mismatch' =>
+              'The two fingerprint scans did not match. Nothing was saved - start again.',
+            'fingerprint_library_full' =>
+              'The lock\'s fingerprint memory is full.',
+            'user_table_full' => 'The lock already has the maximum number of users.',
+            'sensor_busy' => 'The lock\'s sensor is busy. Try again in a moment.',
+            'bad_name' => 'That name cannot be used. Use 1-23 plain characters.',
+            _ => 'The lock could not finish enrollment ($reason). Nothing was saved.',
+          };
+        });
       } else if (type == 'enrollment_complete') {
         setState(() {
           _step = _EnrollStep.success;
@@ -337,6 +390,36 @@ class _EnrollScreenState extends State<EnrollScreen> {
           ],
         );
 
+      case _EnrollStep.newFingerprint:
+        final msg = switch (_fpStep) {
+          'remove' => 'Lift your finger',
+          'place2' => 'Place the SAME finger again',
+          'storing' => 'Saving...',
+          _ => 'Place the new person\'s finger on the sensor',
+        };
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.fingerprint, size: 72, color: Color(0xFF10B981)),
+              const SizedBox(height: 20),
+              Text(
+                msg,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${_nameController.text.trim()}\'s face is captured. The same person\'s finger is read twice and stored with it.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.grey, fontSize: 13),
+              ),
+              const SizedBox(height: 24),
+              const CircularProgressIndicator(),
+            ],
+          ),
+        );
+
       case _EnrollStep.success:
         return Center(
           child: Column(
@@ -351,7 +434,7 @@ class _EnrollScreenState extends State<EnrollScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                '${_nameController.text.trim()} can now unlock the door via face recognition.',
+                '${_nameController.text.trim()} can now unlock the door with this finger and this face.',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Colors.grey, fontSize: 14),
               ),
